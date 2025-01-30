@@ -80,3 +80,82 @@
         (ok tx-id)
     )
 )
+
+
+
+;; Data Maps
+;; (define-map owners principal bool)
+(define-map transaction-signers { tx-id: uint, signer: principal } bool)
+
+
+
+;; Execute a transaction that has sufficient signatures
+(define-public (execute-transaction (tx-id uint))
+    (let
+        ((tx (unwrap! (map-get? transactions tx-id) ERR-TX-NOT-FOUND)))
+
+        ;; Verify sufficient signatures
+        (asserts! (>= (get signatures tx) (var-get required-signatures))
+                 ERR-INSUFFICIENT-SIGNATURES)
+
+        ;; Execute transfer
+        (try! (stx-transfer? (get amount tx) (as-contract tx-sender) (get recipient tx)))
+
+        ;; Update transaction status
+        (map-set transactions tx-id
+            (merge tx { status: "executed" }))
+
+        (ok true)
+    )
+)
+
+;; Helper to check if principal is an owner
+(define-private (is-owner (user principal))
+    (default-to false (map-get? owners user))
+)
+
+;; Helper to check if a signer exists in list
+(define-private (contains-signer? (signers (list 20 principal)) (user principal))
+    (is-some (index-of signers user))
+)
+
+;; Read only functions
+(define-read-only (get-transaction (tx-id uint))
+    (map-get? transactions tx-id)
+)
+
+(define-read-only (get-required-signatures)
+    (var-get required-signatures)
+)
+
+(define-read-only (get-total-owners)
+    (var-get total-owners)
+)
+
+(define-read-only (is-valid-owner (user principal))
+    (is-owner user)
+)
+
+(define-public (sign-transaction (tx-id uint))
+    (let
+        ((tx (unwrap! (map-get? transactions tx-id) ERR-TX-NOT-FOUND)))
+
+        ;; Verify sender is an owner
+        (asserts! (is-owner tx-sender) ERR-NOT-AUTHORIZED)
+
+        ;; Verify not already signed
+        (asserts! (not (contains-signer? (get signers tx) tx-sender)) ERR-ALREADY-SIGNED)
+
+        ;; Verify we won't exceed the maximum list size
+        (asserts! (< (len (get signers tx)) u20) (err u7))
+
+        ;; Update transaction
+        (map-set transactions tx-id
+            (merge tx {
+                signatures: (+ (get signatures tx) u1),
+                signers: (unwrap! (as-max-len? (append (get signers tx) tx-sender) u20) (err u8))
+            }))
+
+        (ok true)
+    )
+)
