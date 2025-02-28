@@ -16,7 +16,8 @@
 (define-constant ERR-EXPIRED (err u13))
 (define-constant ERR-INVALID-SIG-COUNT (err u14))
 (define-constant ERR-TX-ACTIVE (err u15))
-
+(define-constant ERR-INSUFFICIENT-FUNDS (err u16))
+(define-constant ERR-INVALID-EXPIRATION (err u17))
 
 ;; Data Variables
 (define-data-var required-signatures uint u2)  ;; M signatures required
@@ -31,7 +32,9 @@
         amount: uint,
         status: (string-ascii 20),
         signatures: uint,
-        signers: (list 20 principal)
+        signers: (list 20 principal),
+        expiration-height: uint,
+        memo: (optional (string-ascii 100))
     }
 )
 
@@ -72,7 +75,9 @@
             amount: amount,
             status: "pending",
             signatures: u0,
-            signers: (list)
+            signers: (list),
+            expiration-height: (+ stacks-block-height (var-get tx-expiration)),
+            memo: none
         })
 
         ;; Increment nonce
@@ -81,13 +86,54 @@
     )
 )
 
+;;  Submit transaction with memo and custom expiration
+(define-public (submit-transaction-with-memo 
+    (recipient principal) 
+    (amount uint) 
+    (memo (string-ascii 100))
+    (expiration-blocks uint))
+    (let
+        ((tx-id (var-get tx-nonce)))
 
+        ;; Verify sender is an owner
+        (asserts! (is-owner tx-sender) ERR-NOT-AUTHORIZED)
+        
+        ;; Verify expiration is valid
+        (asserts! (> expiration-blocks u0) ERR-INVALID-EXPIRATION)
+        (asserts! (<= expiration-blocks u1440) ERR-INVALID-EXPIRATION) ;; Max 10 days (1440 blocks)
+
+        ;; Create new transaction
+        (map-set transactions tx-id {
+            recipient: recipient,
+            amount: amount,
+            status: "pending",
+            signatures: u0,
+            signers: (list),
+            expiration-height: (+ stacks-block-height expiration-blocks),
+            memo: (some memo)
+        })
+
+        ;; Increment nonce
+        (var-set tx-nonce (+ tx-id u1))
+        
+        ;; Print event for tracking
+        (print {
+            event: "submit-transaction-with-memo",
+            tx-id: tx-id,
+            recipient: recipient,
+            amount: amount,
+            memo: memo,
+            expiration: (+ stacks-block-height expiration-blocks),
+            submitter: tx-sender
+        })
+        
+        (ok tx-id)
+    )
+)
 
 ;; Data Maps
 ;; (define-map owners principal bool)
 (define-map transaction-signers { tx-id: uint, signer: principal } bool)
-
-
 
 ;; Execute a transaction that has sufficient signatures
 (define-public (execute-transaction (tx-id uint))
@@ -97,6 +143,9 @@
         ;; Verify sufficient signatures
         (asserts! (>= (get signatures tx) (var-get required-signatures))
                  ERR-INSUFFICIENT-SIGNATURES)
+        
+        ;; Verify not expired
+        (asserts! (<= stacks-block-height (get expiration-height tx)) ERR-EXPIRED)
 
         ;; Execute transfer
         (try! (stx-transfer? (get amount tx) (as-contract tx-sender) (get recipient tx)))
@@ -148,6 +197,9 @@
 
         ;; Verify we won't exceed the maximum list size
         (asserts! (< (len (get signers tx)) u20) (err u7))
+        
+        ;; Verify not expired
+        (asserts! (<= stacks-block-height (get expiration-height tx)) ERR-EXPIRED)
 
         ;; Update transaction
         (map-set transactions tx-id
@@ -159,7 +211,6 @@
         (ok true)
     )
 )
-
 
 ;; Cancel a pending transaction (only executable by transaction submitter)
 (define-public (cancel-transaction (tx-id uint))
@@ -247,5 +298,66 @@
         })
 
         (ok true)
+    )
+)
+
+;;  Batch processing of transactions
+(define-public (batch-create-transactions
+    (recipients (list 10 principal))
+    (amounts (list 10 uint))
+    (memos (optional (list 10 (string-ascii 100)))))
+    (let
+        ((total-amount (fold + amounts u0)))
+        
+        ;; Verify sender is an owner
+        (asserts! (is-owner tx-sender) ERR-NOT-AUTHORIZED)
+        
+        ;; Verify lists have same length
+        (asserts! (is-eq (len recipients) (len amounts)) ERR-INVALID-SIGNATURE)
+        
+        ;; Verify memos list has same length if provided
+        (asserts! (or 
+                  (is-none memos)
+                  (is-eq (len recipients) (len (unwrap! memos ERR-INVALID-SIGNATURE)))) 
+                ERR-INVALID-SIGNATURE)
+        
+        ;; Verify contract has enough balance
+        (asserts! (>= (stx-get-balance (as-contract tx-sender)) total-amount) ERR-INSUFFICIENT-FUNDS)
+        
+        ;; Process all transactions
+        (ok (map batch-create-transaction 
+                 recipients 
+                 amounts 
+                 (if (is-some memos)
+                     (unwrap! memos ERR-INVALID-SIGNATURE)
+                     (list "Transfer" "Transfer" "Transfer" "Transfer" "Transfer" 
+                           "Transfer" "Transfer" "Transfer" "Transfer" "Transfer"))))
+    )
+)
+
+;; Helper function for batch transaction creation
+(define-private (batch-create-transaction 
+    (recipient principal) 
+    (amount uint)
+    (memo (string-ascii 100)))
+    (let
+        ((tx-id (var-get tx-nonce)))
+        
+        ;; Create new transaction
+        (map-set transactions tx-id {
+            recipient: recipient,
+            amount: amount,
+            status: "pending",
+            signatures: u0,
+            signers: (list),
+            expiration-height: (+ stacks-block-height (var-get tx-expiration)),
+            memo: (some memo)
+        })
+        
+        ;; Increment nonce
+        (var-set tx-nonce (+ tx-id u1))
+        
+        ;; Return transaction ID
+        tx-id
     )
 )
